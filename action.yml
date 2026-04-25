@@ -88,7 +88,7 @@ outputs:
     description: Raw lsec exit code (0 = clean, 1 = threshold breached, 2 = runtime error).
     value: ${{ steps.scan.outputs.exit-code }}
   sarif-path:
-    description: Path to the generated SARIF file (empty when `upload-sarif: false`).
+    description: "Path to the generated SARIF file (empty when `upload-sarif: false`)."
     value: ${{ inputs.upload-sarif == 'true' && inputs.sarif-output || '' }}
   json-path:
     description: Path to the generated JSON report.
