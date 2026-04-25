@@ -27,9 +27,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p fixture/{app,config,routes,public,bootstrap,database/migrations,resources/views}
-          # Marker files that satisfy lsec's Laravel-root validation.
+          # Marker files that satisfy lsec's Laravel-root validation
+          # (artisan + bootstrap/app.php OR config/app.php).
           echo '{"name":"fixture/app","require":{"laravel/framework":"^11.0"}}' > fixture/composer.json
           touch fixture/artisan
+          echo '<?php return [];' > fixture/bootstrap/app.php
+          echo '<?php return [];' > fixture/config/app.php
           # Planted findings.
           cat > fixture/.env <<'EOF'
           APP_ENV=production
