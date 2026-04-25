@@ -26,7 +26,7 @@ while [ $# -gt 0 ]; do
     --dry-run)     DRY_RUN=1 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     -h|--help)
-      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     -*)

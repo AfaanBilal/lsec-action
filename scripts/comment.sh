@@ -29,7 +29,7 @@ TOTAL=$(jq -r   '.counts.total // (.findings | length)' "$JSON_REPORT")
 # Top 10 findings, location-safe, message truncated.
 FINDINGS_TABLE=$(jq -r '
   .findings[:10][]? |
-  "| `\(.rule_id)` | \(.severity) | \((.file // "-")):\((.line // "-")) | \((.message // "")[:80] | gsub("\\|"; "\\\\|") | gsub("\n"; " ")) |"
+  "| `\(.rule_id)` | \(.severity) | \((.file // "-")):\((.line // "-")) | \((.message // "")[:80] | gsub("\\|"; "&#124;") | gsub("\n"; " ")) |"
 ' "$JSON_REPORT" 2>/dev/null || true)
 
 BODY="<!-- lsec-action-comment -->
