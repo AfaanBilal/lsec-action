@@ -1,0 +1,173 @@
+name: lsec — Laravel Security Audit
+description: Scan a Laravel project for security issues and annotate PRs with findings.
+author: Afaan Bilal
+
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  path:
+    description: Path to the Laravel project root.
+    required: false
+    default: .
+
+  version:
+    description: lsec version to use. Defaults to latest.
+    required: false
+    default: latest
+
+  fail-on:
+    description: Minimum severity that fails the job (critical | high | medium | low | info).
+    required: false
+    default: high
+
+  min-confidence:
+    description: Minimum confidence score for reported findings (0.0 – 1.0).
+    required: false
+    default: "0.7"
+
+  baseline:
+    description: Path to a baseline file to suppress known findings.
+    required: false
+    default: ""
+
+  only:
+    description: Comma-separated list of rule categories to run (e.g. env,secrets,injection).
+    required: false
+    default: ""
+
+  skip:
+    description: Comma-separated list of rule categories to skip.
+    required: false
+    default: ""
+
+  upload-sarif:
+    description: Upload SARIF to GitHub Code Scanning. Requires security-events write permission.
+    required: false
+    default: "true"
+
+  post-comment:
+    description: Post a summary comment on pull requests.
+    required: false
+    default: "true"
+
+  sarif-output:
+    description: Path to write the SARIF report.
+    required: false
+    default: lsec.sarif
+
+outputs:
+  findings-count:
+    description: Total number of findings.
+    value: ${{ steps.parse.outputs.findings-count }}
+
+  critical-count:
+    description: Number of CRITICAL findings.
+    value: ${{ steps.parse.outputs.critical-count }}
+
+  high-count:
+    description: Number of HIGH findings.
+    value: ${{ steps.parse.outputs.high-count }}
+
+  result:
+    description: Scan result — pass or fail.
+    value: ${{ steps.parse.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install lsec
+      shell: bash
+      run: |
+        VERSION="${{ inputs.version }}"
+        if [ "$VERSION" = "latest" ]; then
+          VERSION=$(curl -fsSL https://api.github.com/repos/AfaanBilal/lsec/releases/latest \
+            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
+        fi
+        curl -fsSL "https://github.com/AfaanBilal/lsec/releases/download/v${VERSION}/lsec-linux-x86_64.tar.gz" \
+          | tar -xz
+        chmod +x lsec
+        echo "$PWD" >> $GITHUB_PATH
+
+    - name: Build scan flags
+      id: flags
+      shell: bash
+      run: |
+        FLAGS="--ci --fail-on ${{ inputs.fail-on }} --min-confidence ${{ inputs.min-confidence }}"
+        FLAGS="$FLAGS --format sarif --output ${{ inputs.sarif-output }}"
+        [ -n "${{ inputs.baseline }}" ]  && FLAGS="$FLAGS --baseline ${{ inputs.baseline }}"
+        [ -n "${{ inputs.only }}" ]      && FLAGS="$FLAGS --only ${{ inputs.only }}"
+        [ -n "${{ inputs.skip }}" ]      && FLAGS="$FLAGS --skip ${{ inputs.skip }}"
+        echo "flags=$FLAGS" >> $GITHUB_OUTPUT
+
+    - name: Run lsec (SARIF)
+      id: scan
+      shell: bash
+      run: |
+        lsec scan ${{ inputs.path }} ${{ steps.flags.outputs.flags }} || true
+
+    - name: Run lsec (JSON, for comment)
+      id: scan-json
+      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        lsec scan ${{ inputs.path }} \
+          --fail-on ${{ inputs.fail-on }} \
+          --min-confidence ${{ inputs.min-confidence }} \
+          --format json \
+          --output lsec-report.json \
+          ${{ inputs.baseline && format('--baseline {0}', inputs.baseline) || '' }} \
+          ${{ inputs.only && format('--only {0}', inputs.only) || '' }} \
+          ${{ inputs.skip && format('--skip {0}', inputs.skip) || '' }} \
+          || true
+
+    - name: Parse results
+      id: parse
+      shell: bash
+      run: |
+        if [ ! -f lsec-report.json ]; then
+          lsec scan ${{ inputs.path }} --format json --output lsec-report.json || true
+        fi
+        CRITICAL=$(jq '.severity_counts.critical // 0' lsec-report.json)
+        HIGH=$(jq '.severity_counts.high // 0' lsec-report.json)
+        MEDIUM=$(jq '.severity_counts.medium // 0' lsec-report.json)
+        LOW=$(jq '.severity_counts.low // 0' lsec-report.json)
+        TOTAL=$(jq '.findings | length' lsec-report.json)
+        echo "critical-count=$CRITICAL" >> $GITHUB_OUTPUT
+        echo "high-count=$HIGH"         >> $GITHUB_OUTPUT
+        echo "findings-count=$TOTAL"    >> $GITHUB_OUTPUT
+        # Determine result based on fail-on threshold
+        FAIL_ON="${{ inputs.fail-on }}"
+        RESULT="pass"
+        case $FAIL_ON in
+          critical) [ "$CRITICAL" -gt 0 ] && RESULT="fail" ;;
+          high)     [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ] && RESULT="fail" ;;
+          medium)   [ "$((CRITICAL+HIGH+MEDIUM))" -gt 0 ] && RESULT="fail" ;;
+          *)        [ "$TOTAL" -gt 0 ] && RESULT="fail" ;;
+        esac
+        echo "result=$RESULT" >> $GITHUB_OUTPUT
+
+    - name: Upload SARIF to Code Scanning
+      if: inputs.upload-sarif == 'true' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-output }}
+
+    - name: Post PR comment
+      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        RESULT: ${{ steps.parse.outputs.result }}
+        CRITICAL: ${{ steps.parse.outputs.critical-count }}
+        HIGH: ${{ steps.parse.outputs.high-count }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: ${{ github.action_path }}/scripts/comment.sh
+
+    - name: Enforce exit code
+      shell: bash
+      run: |
+        [ "${{ steps.parse.outputs.result }}" = "pass" ] && exit 0 || exit 1
