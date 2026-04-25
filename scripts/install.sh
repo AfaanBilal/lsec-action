@@ -27,28 +27,27 @@ case "$(uname -m)" in
   *) echo "::error::Unsupported arch: $(uname -m)"; exit 1 ;;
 esac
 
-if [ "$VERSION" = "latest" ]; then
-  VERSION=$(curl -fsSL https://api.github.com/repos/AfaanBilal/lsec/releases/latest \
-    | grep '"tag_name"' \
-    | head -1 \
-    | sed 's/.*"v\([^"]*\)".*/\1/')
-  if [ -z "$VERSION" ]; then
-    echo "::error::Could not resolve latest lsec version"; exit 1
-  fi
-fi
-
 if [ "$os" = "windows" ]; then
   asset="lsec-windows-${arch}.zip"
+else
+  asset="lsec-${os}-${arch}.tar.gz"
+fi
+
+# Use GitHub's "latest" redirect URL when the user didn't pin a version.
+# Avoids hitting api.github.com (rate-limited per runner IP).
+if [ "$VERSION" = "latest" ]; then
+  url="https://github.com/AfaanBilal/lsec/releases/latest/download/${asset}"
+else
   url="https://github.com/AfaanBilal/lsec/releases/download/v${VERSION}/${asset}"
-  echo "Downloading $url"
+fi
+
+echo "Downloading $url"
+if [ "$os" = "windows" ]; then
   curl -fsSL "$url" -o "$INSTALL_DIR/lsec.zip"
   unzip -o -q "$INSTALL_DIR/lsec.zip" -d "$INSTALL_DIR"
   rm "$INSTALL_DIR/lsec.zip"
   bin="$INSTALL_DIR/lsec.exe"
 else
-  asset="lsec-${os}-${arch}.tar.gz"
-  url="https://github.com/AfaanBilal/lsec/releases/download/v${VERSION}/${asset}"
-  echo "Downloading $url"
   curl -fsSL "$url" | tar -xz -C "$INSTALL_DIR"
   bin="$INSTALL_DIR/lsec"
   chmod +x "$bin"
@@ -58,4 +57,4 @@ echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 echo "LSEC_BIN=$bin" >> "$GITHUB_ENV"
 echo "LSEC_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-echo "Installed lsec v${VERSION} → $bin"
+echo "Installed lsec ${VERSION} → $bin"
