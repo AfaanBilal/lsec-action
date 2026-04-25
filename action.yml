@@ -1,5 +1,5 @@
 name: lsec — Laravel Security Audit
-description: Scan a Laravel project for security issues and annotate PRs with findings.
+description: Scan a Laravel project for security issues, upload SARIF to Code Scanning, and annotate PRs with findings.
 author: Afaan Bilal
 
 branding:
@@ -13,7 +13,7 @@ inputs:
     default: .
 
   version:
-    description: lsec version to use. Defaults to latest.
+    description: lsec release version to install (e.g. 0.1.4) or "latest".
     required: false
     default: latest
 
@@ -28,27 +28,27 @@ inputs:
     default: "0.7"
 
   baseline:
-    description: Path to a baseline file to suppress known findings.
+    description: Path to a baseline file used to suppress known findings.
     required: false
     default: ""
 
   only:
-    description: Comma-separated list of rule categories to run (e.g. env,secrets,injection).
+    description: Comma-separated rule categories to include (env,auth,injection,http,storage,deps,secrets,logging).
     required: false
     default: ""
 
   skip:
-    description: Comma-separated list of rule categories to skip.
+    description: Comma-separated rule categories to skip.
     required: false
     default: ""
 
   upload-sarif:
-    description: Upload SARIF to GitHub Code Scanning. Requires security-events write permission.
+    description: "Upload SARIF to GitHub Code Scanning. Requires `security-events: write`."
     required: false
     default: "true"
 
   post-comment:
-    description: Post a summary comment on pull requests.
+    description: "Post (or update) a summary comment on the pull request. Requires `pull-requests: write`."
     required: false
     default: "true"
 
@@ -57,117 +57,103 @@ inputs:
     required: false
     default: lsec.sarif
 
+  json-output:
+    description: Path to write the JSON report.
+    required: false
+    default: lsec-report.json
+
 outputs:
   findings-count:
-    description: Total number of findings.
-    value: ${{ steps.parse.outputs.findings-count }}
-
+    description: Total number of findings reported.
+    value: ${{ steps.scan.outputs.findings-count }}
   critical-count:
     description: Number of CRITICAL findings.
-    value: ${{ steps.parse.outputs.critical-count }}
-
+    value: ${{ steps.scan.outputs.critical-count }}
   high-count:
     description: Number of HIGH findings.
-    value: ${{ steps.parse.outputs.high-count }}
-
+    value: ${{ steps.scan.outputs.high-count }}
+  medium-count:
+    description: Number of MEDIUM findings.
+    value: ${{ steps.scan.outputs.medium-count }}
+  low-count:
+    description: Number of LOW findings.
+    value: ${{ steps.scan.outputs.low-count }}
+  info-count:
+    description: Number of INFO findings.
+    value: ${{ steps.scan.outputs.info-count }}
   result:
-    description: Scan result — pass or fail.
-    value: ${{ steps.parse.outputs.result }}
+    description: Overall scan result — `pass` or `fail`.
+    value: ${{ steps.scan.outputs.result }}
+  exit-code:
+    description: Raw lsec exit code (0 = clean, 1 = threshold breached, 2 = runtime error).
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif-path:
+    description: Path to the generated SARIF file (empty when `upload-sarif: false`).
+    value: ${{ inputs.upload-sarif == 'true' && inputs.sarif-output || '' }}
+  json-path:
+    description: Path to the generated JSON report.
+    value: ${{ inputs.json-output }}
 
 runs:
   using: composite
   steps:
     - name: Install lsec
       shell: bash
-      run: |
-        VERSION="${{ inputs.version }}"
-        if [ "$VERSION" = "latest" ]; then
-          VERSION=$(curl -fsSL https://api.github.com/repos/AfaanBilal/lsec/releases/latest \
-            | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')
-        fi
-        curl -fsSL "https://github.com/AfaanBilal/lsec/releases/download/v${VERSION}/lsec-linux-x86_64.tar.gz" \
-          | tar -xz
-        chmod +x lsec
-        echo "$PWD" >> $GITHUB_PATH
+      env:
+        VERSION: ${{ inputs.version }}
+        INSTALL_DIR: ${{ runner.temp }}/lsec-bin
+      run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
 
-    - name: Build scan flags
-      id: flags
-      shell: bash
-      run: |
-        FLAGS="--ci --fail-on ${{ inputs.fail-on }} --min-confidence ${{ inputs.min-confidence }}"
-        FLAGS="$FLAGS --format sarif --output ${{ inputs.sarif-output }}"
-        [ -n "${{ inputs.baseline }}" ]  && FLAGS="$FLAGS --baseline ${{ inputs.baseline }}"
-        [ -n "${{ inputs.only }}" ]      && FLAGS="$FLAGS --only ${{ inputs.only }}"
-        [ -n "${{ inputs.skip }}" ]      && FLAGS="$FLAGS --skip ${{ inputs.skip }}"
-        echo "flags=$FLAGS" >> $GITHUB_OUTPUT
-
-    - name: Run lsec (SARIF)
+    - name: Run lsec (JSON)
       id: scan
       shell: bash
-      run: |
-        lsec scan ${{ inputs.path }} ${{ steps.flags.outputs.flags }} || true
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_ONLY: ${{ inputs.only }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        JSON_OUTPUT: ${{ inputs.json-output }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/scan.sh"
 
-    - name: Run lsec (JSON, for comment)
-      id: scan-json
-      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+    - name: Run lsec (SARIF)
+      if: inputs.upload-sarif == 'true'
       shell: bash
-      run: |
-        lsec scan ${{ inputs.path }} \
-          --fail-on ${{ inputs.fail-on }} \
-          --min-confidence ${{ inputs.min-confidence }} \
-          --format json \
-          --output lsec-report.json \
-          ${{ inputs.baseline && format('--baseline {0}', inputs.baseline) || '' }} \
-          ${{ inputs.only && format('--only {0}', inputs.only) || '' }} \
-          ${{ inputs.skip && format('--skip {0}', inputs.skip) || '' }} \
-          || true
-
-    - name: Parse results
-      id: parse
-      shell: bash
-      run: |
-        if [ ! -f lsec-report.json ]; then
-          lsec scan ${{ inputs.path }} --format json --output lsec-report.json || true
-        fi
-        CRITICAL=$(jq '.severity_counts.critical // 0' lsec-report.json)
-        HIGH=$(jq '.severity_counts.high // 0' lsec-report.json)
-        MEDIUM=$(jq '.severity_counts.medium // 0' lsec-report.json)
-        LOW=$(jq '.severity_counts.low // 0' lsec-report.json)
-        TOTAL=$(jq '.findings | length' lsec-report.json)
-        echo "critical-count=$CRITICAL" >> $GITHUB_OUTPUT
-        echo "high-count=$HIGH"         >> $GITHUB_OUTPUT
-        echo "findings-count=$TOTAL"    >> $GITHUB_OUTPUT
-        # Determine result based on fail-on threshold
-        FAIL_ON="${{ inputs.fail-on }}"
-        RESULT="pass"
-        case $FAIL_ON in
-          critical) [ "$CRITICAL" -gt 0 ] && RESULT="fail" ;;
-          high)     [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ] && RESULT="fail" ;;
-          medium)   [ "$((CRITICAL+HIGH+MEDIUM))" -gt 0 ] && RESULT="fail" ;;
-          *)        [ "$TOTAL" -gt 0 ] && RESULT="fail" ;;
-        esac
-        echo "result=$RESULT" >> $GITHUB_OUTPUT
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_ONLY: ${{ inputs.only }}
+        INPUT_SKIP: ${{ inputs.skip }}
+        SARIF_OUTPUT: ${{ inputs.sarif-output }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/sarif.sh"
 
     - name: Upload SARIF to Code Scanning
-      if: inputs.upload-sarif == 'true' && always()
+      if: inputs.upload-sarif == 'true'
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: ${{ inputs.sarif-output }}
 
     - name: Post PR comment
-      if: inputs.post-comment == 'true' && github.event_name == 'pull_request'
+      if: always() && inputs.post-comment == 'true' && github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
-        RESULT: ${{ steps.parse.outputs.result }}
-        CRITICAL: ${{ steps.parse.outputs.critical-count }}
-        HIGH: ${{ steps.parse.outputs.high-count }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        RESULT: ${{ steps.scan.outputs.result }}
         FAIL_ON: ${{ inputs.fail-on }}
-      run: ${{ github.action_path }}/scripts/comment.sh
+        JSON_REPORT: ${{ inputs.json-output }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/comment.sh"
 
-    - name: Enforce exit code
+    - name: Enforce scan result
       shell: bash
+      env:
+        RESULT: ${{ steps.scan.outputs.result }}
       run: |
-        [ "${{ steps.parse.outputs.result }}" = "pass" ] && exit 0 || exit 1
+        if [ "$RESULT" = "fail" ]; then
+          echo "::error::lsec scan failed with findings at or above the configured threshold"
+          exit 1
+        fi
+        exit 0
